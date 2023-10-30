@@ -23,7 +23,7 @@ namespace util
 
 winrt::com_ptr<ID2D1Bitmap1> CreateBitmapFromTexture(
     winrt::com_ptr<ID3D11Texture2D> const& texture,
-    winrt::com_ptr<ID2D1DeviceContext> const& d2dContext);
+    winrt::com_ptr<ID2D1DeviceContext> const& surfaceContext);
 
 int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
 {
@@ -42,6 +42,9 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
     root.Brush(compositor.CreateColorBrush(winrt::Colors::White()));
     target.Root(root);
 
+    // Turn this on if you want to get debug messages. Keep in mind that
+    // you'll need to install the "Graphics Tools" package in the 
+    // optional features settings page in the Settings app.
     bool debug = true;
     uint32_t d3dFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     auto d2dDebugLevel = D2D1_DEBUG_LEVEL_NONE;
@@ -54,8 +57,8 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
     auto d3dDevice = util::CreateD3DDevice(d3dFlags);
     auto d2dFactory = util::CreateD2DFactory(d2dDebugLevel);
     auto d2dDevice = util::CreateD2DDevice(d2dFactory, d3dDevice);
-    winrt::com_ptr<ID2D1DeviceContext> emptyD2DContext;
-    winrt::check_hresult(d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, emptyD2DContext.put()));
+    winrt::com_ptr<ID2D1DeviceContext> d2dContext;
+    winrt::check_hresult(d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, d2dContext.put()));
     auto compGraphics = util::CreateCompositionGraphicsDevice(compositor, d2dDevice.get());
 
     auto surface = compGraphics.CreateDrawingSurface2({ 50, 50 }, winrt::DirectXPixelFormat::B8G8R8A8UIntNormalized, winrt::DirectXAlphaMode::Premultiplied);
@@ -67,16 +70,16 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
     // First, let's clear the surface
     {
         auto surfaceInterop = surface.as<abi::ICompositionDrawingSurfaceInterop>();
-        winrt::com_ptr<ID2D1DeviceContext> d2dContext;
+        winrt::com_ptr<ID2D1DeviceContext> surfaceContext;
         POINT offset = {};
-        winrt::check_hresult(surfaceInterop->BeginDraw(nullptr, winrt::guid_of<ID2D1DeviceContext>(), d2dContext.put_void(), &offset));
+        winrt::check_hresult(surfaceInterop->BeginDraw(nullptr, winrt::guid_of<ID2D1DeviceContext>(), surfaceContext.put_void(), &offset));
         auto endDraw = wil::scope_exit([surfaceInterop]()
             {
                 winrt::check_hresult(surfaceInterop->EndDraw());
             });
 
         auto color = D2D1_COLOR_F{ 1.0f, 0.0f, 0.0f, 1.0f };
-        d2dContext->Clear(&color);
+        surfaceContext->Clear(&color);
     }
 
     // Next, let's create a texture to hold our copy
@@ -95,6 +98,14 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         winrt::check_hresult(d3dDevice->CreateTexture2D(&desc, nullptr, copyTexture.put()));
     }
+    auto copyBitmap = CreateBitmapFromTexture(copyTexture, d2dContext);
+
+    // We'll use this for drawing later
+    winrt::com_ptr<ID2D1SolidColorBrush> debugBrush;
+    {
+        auto debugColor = D2D1_COLOR_F{ 0.0f, 1.0f, 0.0f, 0.5f };
+        winrt::check_hresult(d2dContext->CreateSolidColorBrush(debugColor, debugBrush.put()));
+    }
 
     // Now, let's copy the surface contents
     {
@@ -105,32 +116,26 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
     // Draw the copy back into the surface and then draw over it
     {
         auto surfaceInterop = surface.as<abi::ICompositionDrawingSurfaceInterop>();
-        winrt::com_ptr<ID2D1DeviceContext> d2dContext;
+        winrt::com_ptr<ID2D1DeviceContext> surfaceContext;
         POINT offset = {};
-        winrt::check_hresult(surfaceInterop->BeginDraw(nullptr, winrt::guid_of<ID2D1DeviceContext>(), d2dContext.put_void(), &offset));
+        winrt::check_hresult(surfaceInterop->BeginDraw(nullptr, winrt::guid_of<ID2D1DeviceContext>(), surfaceContext.put_void(), &offset));
         auto endDraw = wil::scope_exit([surfaceInterop]()
             {
                 winrt::check_hresult(surfaceInterop->EndDraw());
             });
 
-        auto copyBitmap = CreateBitmapFromTexture(copyTexture, d2dContext);
-        winrt::com_ptr<ID2D1SolidColorBrush> debugBrush;
-        {
-            auto debugColor = D2D1_COLOR_F{ 0.0f, 1.0f, 0.0f, 0.5f };
-            winrt::check_hresult(d2dContext->CreateSolidColorBrush(debugColor, debugBrush.put()));
-        }
-
         // Technically this clear is unneccessary, it's just here for debugging
         auto color = D2D1_COLOR_F{ 0.0f, 0.0f, 1.0f, 1.0f };
-        d2dContext->Clear(&color);
+        surfaceContext->Clear(&color);
 
-        d2dContext->SetTransform(D2D1::Matrix3x2F::Translation({ static_cast<float>(offset.x), static_cast<float>(offset.y) }));
+        surfaceContext->SetTransform(D2D1::Matrix3x2F::Translation({ static_cast<float>(offset.x), static_cast<float>(offset.y) }));
 
-        d2dContext->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
-        d2dContext->DrawBitmap(copyBitmap.get());
-        d2dContext->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+        surfaceContext->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+        surfaceContext->DrawBitmap(copyBitmap.get());
+
+        surfaceContext->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
         auto rect = D2D1_RECT_F{ 25.0f, 25.0f, 50.0f, 50.0f };
-        d2dContext->FillRectangle(&rect, debugBrush.get());
+        surfaceContext->FillRectangle(&rect, debugBrush.get());
     }
 
     // Message pump
@@ -145,10 +150,10 @@ int __stdcall WinMain(HINSTANCE, HINSTANCE, PSTR, int)
 
 winrt::com_ptr<ID2D1Bitmap1> CreateBitmapFromTexture(
     winrt::com_ptr<ID3D11Texture2D> const& texture,
-    winrt::com_ptr<ID2D1DeviceContext> const& d2dContext)
+    winrt::com_ptr<ID2D1DeviceContext> const& surfaceContext)
 {
     auto dxgiSurface = texture.as<IDXGISurface>();
     winrt::com_ptr<ID2D1Bitmap1> bitmap;
-    winrt::check_hresult(d2dContext->CreateBitmapFromDxgiSurface(dxgiSurface.get(), nullptr, bitmap.put()));
+    winrt::check_hresult(surfaceContext->CreateBitmapFromDxgiSurface(dxgiSurface.get(), nullptr, bitmap.put()));
     return bitmap;
 }
